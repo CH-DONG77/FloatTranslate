@@ -13,5 +13,6 @@ config.json
 # IDE / OS
 .vscode/
 .idea/
+.claude/
 .DS_Store
 Thumbs.db
