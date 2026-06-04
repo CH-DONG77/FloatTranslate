@@ -1,7 +1,7 @@
-"""Translation via the Anthropic (Claude) API, with a small in-memory cache."""
+"""Translation via a pluggable LLM provider, with a small in-memory cache."""
 from __future__ import annotations
 
-from anthropic import Anthropic
+from providers import get_provider
 
 _SYSTEM = (
     "You are a translation engine embedded in a screen-translation tool. "
@@ -15,10 +15,12 @@ _SYSTEM = (
 
 
 class Translator:
-    def __init__(self, api_key: str, model: str, target_language: str):
+    def __init__(self, provider_id: str, api_key: str, model: str,
+                 target_language: str):
         if not api_key:
             raise ValueError("missing_api_key")
-        self._client = Anthropic(api_key=api_key)
+        self._provider = get_provider(provider_id)
+        self._api_key = api_key
         self._model = model
         self._target = target_language
         self._cache: dict[str, str] = {}
@@ -30,15 +32,8 @@ class Translator:
         if text in self._cache:
             return self._cache[text]
 
-        message = self._client.messages.create(
-            model=self._model,
-            max_tokens=1024,
-            system=_SYSTEM.format(target=self._target),
-            messages=[{"role": "user", "content": text}],
-        )
-        out = "".join(
-            block.text for block in message.content if block.type == "text"
-        ).strip()
+        system = _SYSTEM.format(target=self._target)
+        out = self._provider.translate(self._api_key, self._model, system, text)
 
         # Bound cache growth.
         if len(self._cache) > 256:

@@ -16,6 +16,7 @@ import mss
 from PIL import Image
 
 import ocr
+import providers
 from config import Config
 from translator import Translator
 
@@ -165,12 +166,14 @@ class FloatTranslate:
 
     # --------------------------------------------------------- translation --
     def _ensure_translator(self) -> Translator | None:
-        key = self.cfg.resolved_api_key()
-        signature = (key, self.cfg.model, self.cfg.target_language)
+        provider = self.cfg.provider
+        key = self.cfg.resolved_api_key(provider)
+        signature = (provider, key, self.cfg.model, self.cfg.target_language)
         if not key:
             return None
         if signature != self._translator_signature:
-            self._translator = Translator(key, self.cfg.model, self.cfg.target_language)
+            self._translator = Translator(
+                provider, key, self.cfg.model, self.cfg.target_language)
             self._translator_signature = signature
         return self._translator
 
@@ -290,58 +293,176 @@ class SettingsDialog:
         top.configure(bg=BAR_BG, padx=16, pady=16)
         top.attributes("-topmost", True)
         top.resizable(False, False)
+        top.columnconfigure(1, weight=1)
 
         try:
             langs = ["（自动）"] + ocr.available_languages()
         except Exception:
             langs = ["（自动）"]
 
-        self.vars = {
-            "api_key": tk.StringVar(value=cfg.api_key),
-            "model": tk.StringVar(value=cfg.model),
-            "target_language": tk.StringVar(value=cfg.target_language),
-            "ocr_language": tk.StringVar(value=cfg.ocr_language or "（自动）"),
-            "auto_interval_ms": tk.StringVar(value=str(cfg.auto_interval_ms)),
-        }
+        # Per-provider keys are edited on a local copy so 取消 discards changes.
+        self.keys: dict[str, str] = dict(cfg.api_keys)
+        self.models_cache: dict[str, list[str]] = {}
+        self._validating = False
+        self._current_pid = cfg.provider
 
-        rows = [
-            ("Anthropic API Key", "api_key", None),
-            ("模型", "model", None),
-            ("目标语言", "target_language", None),
-            ("OCR 源语言", "ocr_language", langs),
-            ("自动间隔 (毫秒)", "auto_interval_ms", None),
-        ]
-        for i, (label, key, choices) in enumerate(rows):
-            tk.Label(top, text=label, bg=BAR_BG, fg=BAR_FG,
-                     font=("Segoe UI", 9)).grid(row=i, column=0, sticky="w", pady=4)
-            if choices:
-                w = ttk.Combobox(top, textvariable=self.vars[key],
-                                 values=choices, state="readonly", width=30)
-            else:
-                show = "*" if key == "api_key" else ""
-                w = tk.Entry(top, textvariable=self.vars[key], width=33, show=show)
-            w.grid(row=i, column=1, sticky="ew", padx=(10, 0), pady=4)
+        self._pids = providers.provider_ids()
+        self._labels = [providers.provider_label(p) for p in self._pids]
+        self._label_to_id = dict(zip(self._labels, self._pids))
+
+        self.var_provider = tk.StringVar(value=providers.provider_label(cfg.provider))
+        self.var_api_key = tk.StringVar(value=self.keys.get(cfg.provider, ""))
+        self.var_model = tk.StringVar(value=cfg.model)
+        self.var_target = tk.StringVar(value=cfg.target_language)
+        self.var_ocr = tk.StringVar(value=cfg.ocr_language or "（自动）")
+        self.var_interval = tk.StringVar(value=str(cfg.auto_interval_ms))
+
+        r = 0
+        # --- provider ---
+        self._label(top, "服务商", r)
+        self.cmb_provider = ttk.Combobox(
+            top, textvariable=self.var_provider, values=self._labels,
+            state="readonly", width=30)
+        self.cmb_provider.grid(row=r, column=1, sticky="ew", padx=(10, 0), pady=4)
+        self.cmb_provider.bind("<<ComboboxSelected>>", self._on_provider_change)
+        r += 1
+
+        # --- api key ---
+        self._label(top, "API Key", r)
+        self.ent_key = tk.Entry(top, textvariable=self.var_api_key, width=33, show="*")
+        self.ent_key.grid(row=r, column=1, sticky="ew", padx=(10, 0), pady=4)
+        r += 1
+
+        # --- validate + status ---
+        vbar = tk.Frame(top, bg=BAR_BG)
+        vbar.grid(row=r, column=1, sticky="w", padx=(10, 0), pady=(0, 4))
+        self.btn_validate = app._mk_button(vbar, "验证并获取模型", self._validate,
+                                           accent=True)
+        self.btn_validate.pack(side="left")
+        self.lbl_validate = tk.Label(vbar, text="", bg=BAR_BG, fg="#9aa0a6",
+                                     font=("Segoe UI", 8))
+        self.lbl_validate.pack(side="left", padx=8)
+        r += 1
+
+        # --- model ---
+        self._label(top, "模型", r)
+        self.cmb_model = ttk.Combobox(
+            top, textvariable=self.var_model,
+            values=self._initial_models(cfg.provider, cfg.model), width=30)
+        self.cmb_model.grid(row=r, column=1, sticky="ew", padx=(10, 0), pady=4)
+        r += 1
+
+        # --- target language ---
+        self._label(top, "目标语言", r)
+        tk.Entry(top, textvariable=self.var_target, width=33).grid(
+            row=r, column=1, sticky="ew", padx=(10, 0), pady=4)
+        r += 1
+
+        # --- ocr language ---
+        self._label(top, "OCR 源语言", r)
+        ttk.Combobox(top, textvariable=self.var_ocr, values=langs,
+                     state="readonly", width=30).grid(
+            row=r, column=1, sticky="ew", padx=(10, 0), pady=4)
+        r += 1
+
+        # --- auto interval ---
+        self._label(top, "自动间隔 (毫秒)", r)
+        tk.Entry(top, textvariable=self.var_interval, width=33).grid(
+            row=r, column=1, sticky="ew", padx=(10, 0), pady=4)
+        r += 1
 
         hint = tk.Label(
             top, fg="#9aa0a6", bg=BAR_BG, font=("Segoe UI", 8), justify="left",
-            text="留空 API Key 时将使用环境变量 ANTHROPIC_API_KEY。",
+            text="留空 API Key 时将使用对应环境变量（如 OPENAI_API_KEY）。\n"
+                 "点「验证并获取模型」可校验 Key 并拉取可用模型列表。",
         )
-        hint.grid(row=len(rows), column=0, columnspan=2, sticky="w", pady=(8, 0))
+        hint.grid(row=r, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        r += 1
 
         btns = tk.Frame(top, bg=BAR_BG)
-        btns.grid(row=len(rows) + 1, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=r, column=0, columnspan=2, sticky="e", pady=(12, 0))
         app._mk_button(btns, "取消", top.destroy).pack(side="right", padx=4)
         app._mk_button(btns, "保存", self._save, accent=True).pack(side="right")
 
+    # ---- helpers --------------------------------------------------------- #
+    def _label(self, parent, text, row):
+        tk.Label(parent, text=text, bg=BAR_BG, fg=BAR_FG,
+                 font=("Segoe UI", 9)).grid(row=row, column=0, sticky="w", pady=4)
+
+    def _initial_models(self, pid, current) -> list[str]:
+        models = self.models_cache.get(pid) or providers.default_models(pid)
+        if current and current not in models:
+            models = [current] + models
+        return list(dict.fromkeys(models))
+
+    def _set_validate(self, text, color="#9aa0a6"):
+        self.lbl_validate.configure(text=text, fg=color)
+
+    def _on_provider_change(self, _evt=None):
+        # Commit the visible key to the provider we're leaving.
+        self.keys[self._current_pid] = self.var_api_key.get().strip()
+        self._current_pid = self._label_to_id[self.var_provider.get()]
+        self.var_api_key.set(self.keys.get(self._current_pid, ""))
+        models = self._initial_models(self._current_pid, "")
+        self.cmb_model.configure(values=models)
+        if self.var_model.get() not in models:
+            self.var_model.set(models[0] if models else "")
+        self._set_validate("")
+
+    # ---- validation (runs off the UI thread) ----------------------------- #
+    def _validate(self):
+        if self._validating:
+            return
+        pid = self._current_pid
+        key = self.var_api_key.get().strip() or self.app.cfg.resolved_api_key(pid)
+        if not key:
+            self._set_validate("请先填入 API Key", "#f28b82")
+            return
+        self._validating = True
+        self.btn_validate.configure(state="disabled")
+        self._set_validate("验证中…", "#fdd663")
+        threading.Thread(target=self._validate_worker, args=(pid, key),
+                         daemon=True).start()
+
+    def _validate_worker(self, pid, key):
+        try:
+            models = providers.get_provider(pid).list_models(key)
+            self.top.after(0, lambda: self._validate_done(pid, models, None))
+        except Exception as exc:  # noqa: BLE001 — show the message in the dialog
+            msg = str(exc)
+            self.top.after(0, lambda: self._validate_done(pid, None, msg))
+
+    def _validate_done(self, pid, models, error):
+        self._validating = False
+        if not self.top.winfo_exists():
+            return
+        self.btn_validate.configure(state="normal")
+        if error:
+            self._set_validate(f"✗ {error}", "#f28b82")
+            return
+        if not models:
+            self._set_validate("✓ Key 可用，但未获取到模型", "#fdd663")
+            return
+        self.models_cache[pid] = models
+        if pid == self._current_pid:
+            self.cmb_model.configure(values=models)
+            if self.var_model.get() not in models:
+                self.var_model.set(models[0])
+        self._set_validate(f"✓ Key 可用，{len(models)} 个模型", "#81c995")
+
+    # ---- save ------------------------------------------------------------ #
     def _save(self):
         cfg = self.app.cfg
-        cfg.api_key = self.vars["api_key"].get().strip()
-        cfg.model = self.vars["model"].get().strip() or cfg.model
-        cfg.target_language = self.vars["target_language"].get().strip() or cfg.target_language
-        ocr_lang = self.vars["ocr_language"].get().strip()
+        self.keys[self._current_pid] = self.var_api_key.get().strip()
+        cfg.provider = self._current_pid
+        cfg.api_keys = dict(self.keys)
+        cfg.api_key = ""  # legacy field now lives in api_keys
+        cfg.model = self.var_model.get().strip() or cfg.model
+        cfg.target_language = self.var_target.get().strip() or cfg.target_language
+        ocr_lang = self.var_ocr.get().strip()
         cfg.ocr_language = "" if ocr_lang in ("", "（自动）") else ocr_lang
         try:
-            cfg.auto_interval_ms = max(400, int(self.vars["auto_interval_ms"].get()))
+            cfg.auto_interval_ms = max(400, int(self.var_interval.get()))
         except ValueError:
             pass
         cfg.save()

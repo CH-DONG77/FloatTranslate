@@ -5,7 +5,8 @@
 本身无法复制。
 
 - **识别**：Windows 系统自带 OCR（`Windows.Media.Ocr`），免安装、本地运行。
-- **翻译**：Claude 大模型 API，能容忍 OCR 噪声、理解上下文。
+- **翻译**：大模型 API，能容忍 OCR 噪声、理解上下文。支持 **Anthropic (Claude)、
+  OpenAI、DeepSeek、Google (Gemini)**，在设置里切换。
 - **方向**：任意语言 → 简体中文（可在设置里改目标语言）。
 
 ## 工作原理
@@ -31,11 +32,16 @@ pip install -r requirements.txt
 
 ## 配置 API Key
 
-二选一：
+启动后点 ⚙ 打开设置：
 
-1. 设置环境变量 `ANTHROPIC_API_KEY`，或
-2. 启动后点 ⚙ 在设置窗口里填入 API Key（保存到
-   `%APPDATA%\FloatTranslate\config.json`）。
+1. 选择**服务商**（Anthropic / OpenAI / DeepSeek / Google）。
+2. 填入对应的 **API Key**，点「**验证并获取模型**」—— 会先校验 Key 是否可用，
+   再拉取该服务商当前可调用的模型列表填进「模型」下拉框。
+3. 选好模型后点保存（写入 `%APPDATA%\FloatTranslate\config.json`）。
+
+每个服务商的 Key 单独保存，可随时切换。留空时会回退到对应环境变量：
+`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` /
+`GOOGLE_API_KEY`（或 `GEMINI_API_KEY`）。
 
 ## 运行
 
@@ -62,7 +68,8 @@ python app.py
 |------|------|
 | `app.py` | 悬浮窗主程序与界面 |
 | `ocr.py` | Windows OCR 封装 |
-| `translator.py` | Claude 翻译（带缓存） |
+| `providers.py` | 各大模型服务商：校验 Key、列模型、翻译 |
+| `translator.py` | 翻译入口（带缓存，委托给 provider） |
 | `config.py` | 配置读写 |
 
 ## 小贴士
