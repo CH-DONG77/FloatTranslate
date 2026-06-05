@@ -30,6 +30,9 @@ BAR_FG = "#e8eaed"
 RESULT_BG = "#2b2c2f"
 RESULT_FG = "#f1f3f4"
 ACCENT = "#3b6ef5"
+# Light-gray veil drawn over the capture region (dithered so it reads as
+# semi-transparent and you can still see the text underneath).
+VEIL = "#d9d9d9"
 
 
 def _enable_dpi_awareness() -> None:
@@ -53,6 +56,8 @@ class FloatTranslate:
         self._auto_job: str | None = None
         self._last_image_hash: int | None = None
         self._last_text: str = ""
+        self._minimized = False
+        self._ball: tk.Toplevel | None = None
 
         self.root = tk.Tk()
         self.root.title("FloatTranslate")
@@ -93,16 +98,24 @@ class FloatTranslate:
         self.auto_btn = self._mk_button(btns, "自动:关", self.toggle_auto)
         self.auto_btn.pack(side="left", padx=2)
         self._mk_button(btns, "⚙", self.open_settings).pack(side="left", padx=2)
+        self._mk_button(btns, "—", self.minimize).pack(side="left", padx=2)
         self._mk_button(btns, "×", self._on_close).pack(side="left", padx=2)
 
         for w in (bar, grip, self.status):
             w.bind("<Button-1>", self._start_move)
             w.bind("<B1-Motion>", self._on_move)
 
-        # --- transparent capture band ---
-        self.capture = tk.Frame(self.root, bg=TRANSPARENT,
-                                highlightthickness=2, highlightbackground=ACCENT)
+        # --- transparent capture band (with a light-gray veil) ---
+        # The canvas body is the sentinel colour = a real see-through hole.
+        # A dithered light-gray rectangle on top reads as a semi-transparent
+        # veil; it is hidden for the instant we take the screenshot so OCR
+        # only sees what lies behind the window.
+        self.capture = tk.Canvas(self.root, bg=TRANSPARENT, bd=0,
+                                 highlightthickness=2, highlightbackground=ACCENT)
         self.capture.grid(row=1, column=0, sticky="nsew")
+        self._veil = self.capture.create_rectangle(
+            0, 0, 1, 1, fill=VEIL, stipple="gray25", outline="")
+        self.capture.bind("<Configure>", self._on_capture_configure)
 
         # --- result panel ---
         result = tk.Frame(self.root, bg=RESULT_BG, height=120)
@@ -154,6 +167,10 @@ class FloatTranslate:
         h = max(220, self._oh + (e.y_root - self._my))
         self.root.geometry(f"{w}x{h}")
 
+    def _on_capture_configure(self, e):
+        # Keep the gray veil covering the whole capture canvas.
+        self.capture.coords(self._veil, 0, 0, e.width, e.height)
+
     # ------------------------------------------------------------ status ----
     def _set_status(self, text, color="#9aa0a6"):
         self.status.configure(text=text, fg=color)
@@ -192,7 +209,7 @@ class FloatTranslate:
         self._scan(force=True)
 
     def _scan(self, force: bool):
-        if self._busy:
+        if self._busy or self._minimized:
             return
         translator = self._ensure_translator()
         if translator is None:
@@ -200,22 +217,34 @@ class FloatTranslate:
             if force:
                 self.open_settings()
             return
-        bbox = self._capture_bbox()
-        if bbox is None:
+        img = self._grab_capture()
+        if img is None:
             return
 
         self._busy = True
         self._set_status("识别中…", "#fdd663")
         threading.Thread(
-            target=self._worker, args=(translator, bbox, force), daemon=True
+            target=self._worker, args=(translator, img, force), daemon=True
         ).start()
 
-    def _worker(self, translator: Translator, bbox: dict, force: bool):
+    def _grab_capture(self) -> Image.Image | None:
+        """Screenshot the capture region, momentarily hiding the gray veil so
+        only the content behind the window is captured. Runs on the UI thread
+        (the grab itself is fast; OCR/translation happen in the worker)."""
+        bbox = self._capture_bbox()
+        if bbox is None:
+            return None
+        self.capture.itemconfigure(self._veil, state="hidden")
+        self.capture.update_idletasks()
         try:
             with mss.MSS() as sct:
                 shot = sct.grab(bbox)
-            img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+            return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+        finally:
+            self.capture.itemconfigure(self._veil, state="normal")
 
+    def _worker(self, translator: Translator, img: Image.Image, force: bool):
+        try:
             img_hash = hash(img.tobytes())
             if not force and img_hash == self._last_image_hash:
                 self.root.after(0, lambda: self._finish(None, None))
@@ -269,8 +298,64 @@ class FloatTranslate:
     def open_settings(self):
         SettingsDialog(self)
 
+    # ----------------------------------------------------- minimize / ball ----
+    def minimize(self):
+        """Hide the main window and show a draggable floating ball instead."""
+        if self._minimized:
+            return
+        self._minimized = True
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        self.root.withdraw()
+        self._show_ball(x, y)
+
+    def _show_ball(self, x: int, y: int):
+        size = 60
+        ball = self._ball = tk.Toplevel(self.root)
+        ball.overrideredirect(True)
+        ball.attributes("-topmost", True)
+        ball.configure(bg=TRANSPARENT)
+        ball.attributes("-transparentcolor", TRANSPARENT)
+        ball.geometry(f"{size}x{size}+{max(0, x)}+{max(0, y)}")
+
+        cv = tk.Canvas(ball, width=size, height=size, bg=TRANSPARENT,
+                       highlightthickness=0, cursor="hand2")
+        cv.pack()
+        # The transparent corners make the window read as a circle.
+        cv.create_oval(4, 4, size - 4, size - 4, fill=ACCENT,
+                       outline="#ffffff", width=2)
+        cv.create_text(size // 2, size // 2, text="译", fill="white",
+                       font=("Microsoft YaHei UI", 20, "bold"))
+
+        cv.bind("<Button-1>", self._ball_press)
+        cv.bind("<B1-Motion>", self._ball_drag)
+        cv.bind("<Double-Button-1>", self._restore)
+
+    def _ball_press(self, e):
+        self._bx, self._by = e.x_root, e.y_root
+        self._box, self._boy = self._ball.winfo_x(), self._ball.winfo_y()
+
+    def _ball_drag(self, e):
+        self._ball.geometry(
+            f"+{self._box + (e.x_root - self._bx)}+{self._boy + (e.y_root - self._by)}")
+
+    def _restore(self, _e=None):
+        """Double-click the ball: destroy it and bring the window back where
+        the ball now sits."""
+        if self._ball is not None:
+            bx, by = self._ball.winfo_x(), self._ball.winfo_y()
+            self._ball.destroy()
+            self._ball = None
+            self.root.geometry(f"+{max(0, bx)}+{max(0, by)}")
+        self._minimized = False
+        self.root.deiconify()
+        self.root.lift()
+        self.root.attributes("-topmost", True)
+
     # -------------------------------------------------------------- close ----
     def _on_close(self):
+        if self._ball is not None:
+            self._ball.destroy()
+            self._ball = None
         try:
             self.cfg.geometry = (
                 f"{self.root.winfo_width()}x{self.root.winfo_height()}"
