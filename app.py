@@ -30,10 +30,12 @@ BAR_FG = "#e8eaed"
 RESULT_BG = "#000000"
 RESULT_FG = "#f1f3f4"
 ACCENT = "#3b6ef5"
-# Gray veil drawn over the capture region (dithered so it reads as
-# semi-transparent while you can still see the text underneath).
-VEIL = "#9e9e9e"
-VEIL_STIPPLE = "gray50"
+# Solid gray veil over the capture region, drawn in a separate overlay window
+# with real per-window transparency (so it's a clean solid colour, not a
+# dithered pattern). It's click-through and is flashed invisible at the moment
+# of capture so OCR still sees the content behind it.
+VEIL = "#808080"
+VEIL_ALPHA = 0.4
 
 
 def _enable_dpi_awareness() -> None:
@@ -59,6 +61,7 @@ class FloatTranslate:
         self._last_text: str = ""
         self._minimized = False
         self._ball: tk.Toplevel | None = None
+        self._veil_win: tk.Toplevel | None = None
 
         self.root = tk.Tk()
         self.root.title("FloatTranslate")
@@ -71,6 +74,7 @@ class FloatTranslate:
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.after(60, self._create_veil)
 
     # ---------------------------------------------------------------- UI ----
     def _build_ui(self) -> None:
@@ -106,16 +110,13 @@ class FloatTranslate:
             w.bind("<Button-1>", self._start_move)
             w.bind("<B1-Motion>", self._on_move)
 
-        # --- transparent capture band (with a light-gray veil) ---
-        # The canvas body is the sentinel colour = a real see-through hole.
-        # A dithered light-gray rectangle on top reads as a semi-transparent
-        # veil; it is hidden for the instant we take the screenshot so OCR
-        # only sees what lies behind the window.
+        # --- transparent capture band ---
+        # The canvas body is the sentinel colour = a real see-through hole, so
+        # screenshots grab whatever is behind the window. The gray tint is a
+        # separate translucent overlay window (see _create_veil).
         self.capture = tk.Canvas(self.root, bg=TRANSPARENT, bd=0,
                                  highlightthickness=2, highlightbackground=ACCENT)
         self.capture.grid(row=1, column=0, sticky="nsew")
-        self._veil = self.capture.create_rectangle(
-            0, 0, 1, 1, fill=VEIL, stipple=VEIL_STIPPLE, outline="")
         self.capture.bind("<Configure>", self._on_capture_configure)
 
         # --- result panel ---
@@ -158,6 +159,7 @@ class FloatTranslate:
     def _on_move(self, e):
         self.root.geometry(
             f"+{self._ox + (e.x_root - self._mx)}+{self._oy + (e.y_root - self._my)}")
+        self._sync_veil()
 
     def _start_resize(self, e):
         self._mx, self._my = e.x_root, e.y_root
@@ -167,10 +169,46 @@ class FloatTranslate:
         w = max(280, self._ow + (e.x_root - self._mx))
         h = max(220, self._oh + (e.y_root - self._my))
         self.root.geometry(f"{w}x{h}")
+        self._sync_veil()
 
-    def _on_capture_configure(self, e):
-        # Keep the gray veil covering the whole capture canvas.
-        self.capture.coords(self._veil, 0, 0, e.width, e.height)
+    def _on_capture_configure(self, _e=None):
+        self._sync_veil()
+
+    # ------------------------------------------------------------- veil ------
+    def _create_veil(self):
+        """A separate translucent, click-through window that tints the capture
+        region a solid gray (real alpha, not a dithered pattern)."""
+        veil = self._veil_win = tk.Toplevel(self.root)
+        veil.overrideredirect(True)
+        veil.attributes("-topmost", True)
+        veil.configure(bg=VEIL)
+        veil.attributes("-alpha", VEIL_ALPHA)
+        veil.update_idletasks()
+        self._make_click_through(veil)
+        self._sync_veil()
+
+    def _make_click_through(self, win: tk.Toplevel):
+        """Add WS_EX_TRANSPARENT so mouse events pass through the overlay."""
+        try:
+            GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT = -20, 0x80000, 0x20
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetParent(win.winfo_id())
+            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            user32.SetWindowLongW(
+                hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+        except Exception:
+            pass
+
+    def _sync_veil(self):
+        """Keep the veil window exactly over the capture region's interior."""
+        if self._veil_win is None or self._minimized:
+            return
+        self.root.update_idletasks()
+        x = self.capture.winfo_rootx() + 2
+        y = self.capture.winfo_rooty() + 2
+        w = max(1, self.capture.winfo_width() - 4)
+        h = max(1, self.capture.winfo_height() - 4)
+        self._veil_win.geometry(f"{w}x{h}+{x}+{y}")
 
     # ------------------------------------------------------------ status ----
     def _set_status(self, text, color="#9aa0a6"):
@@ -235,14 +273,19 @@ class FloatTranslate:
         bbox = self._capture_bbox()
         if bbox is None:
             return None
-        self.capture.itemconfigure(self._veil, state="hidden")
-        self.capture.update_idletasks()
+        # Flash the overlay invisible so the screenshot sees only the content
+        # behind the window, then restore it.
+        veil = self._veil_win
+        if veil is not None:
+            veil.attributes("-alpha", 0)
+            veil.update_idletasks()
         try:
             with mss.MSS() as sct:
                 shot = sct.grab(bbox)
             return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
         finally:
-            self.capture.itemconfigure(self._veil, state="normal")
+            if veil is not None:
+                veil.attributes("-alpha", VEIL_ALPHA)
 
     def _worker(self, translator: Translator, img: Image.Image, force: bool):
         try:
@@ -312,6 +355,8 @@ class FloatTranslate:
         # Remember where to bring the window back to.
         self._restore_pos = (self.root.winfo_x(), self.root.winfo_y())
         self.root.withdraw()
+        if self._veil_win is not None:
+            self._veil_win.withdraw()
 
         size, margin_x, margin_y = 60, 40, 80  # bottom margin clears the taskbar
         sw = self.root.winfo_screenwidth()
@@ -360,12 +405,18 @@ class FloatTranslate:
         self.root.deiconify()
         self.root.lift()
         self.root.attributes("-topmost", True)
+        if self._veil_win is not None:
+            self._veil_win.deiconify()
+            self._sync_veil()
 
     # -------------------------------------------------------------- close ----
     def _on_close(self):
         if self._ball is not None:
             self._ball.destroy()
             self._ball = None
+        if self._veil_win is not None:
+            self._veil_win.destroy()
+            self._veil_win = None
         try:
             self.cfg.geometry = (
                 f"{self.root.winfo_width()}x{self.root.winfo_height()}"
