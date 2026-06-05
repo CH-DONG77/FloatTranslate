@@ -3,7 +3,12 @@
 Position the transparent middle band over text in any app (game, image,
 PDF, foreign UI). Click 翻译 for a one-shot translation, or toggle 自动 to
 keep re-translating as the underlying text changes. Recognition uses the
-built-in Windows OCR; translation uses the Claude API.
+built-in Windows OCR; translation uses a pluggable LLM provider.
+
+Two display modes:
+- Panel mode (default): the translation is shown in the bottom panel.
+- Overlay mode (覆盖): each recognized line is covered with a white box and the
+  translation is drawn in place, right over the original text.
 """
 from __future__ import annotations
 
@@ -62,6 +67,8 @@ class FloatTranslate:
         self._minimized = False
         self._ball: tk.Toplevel | None = None
         self._veil_win: tk.Toplevel | None = None
+        self._overlay_win: tk.Toplevel | None = None
+        self._overlay_canvas: tk.Canvas | None = None
 
         self.root = tk.Tk()
         self.root.title("FloatTranslate")
@@ -74,7 +81,7 @@ class FloatTranslate:
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.root.after(60, self._create_veil)
+        self.root.after(60, self._create_overlays)
 
     # ---------------------------------------------------------------- UI ----
     def _build_ui(self) -> None:
@@ -102,6 +109,9 @@ class FloatTranslate:
             side="left", padx=2)
         self.auto_btn = self._mk_button(btns, "自动:关", self.toggle_auto)
         self.auto_btn.pack(side="left", padx=2)
+        self.overlay_btn = self._mk_button(
+            btns, f"覆盖:{'开' if self.cfg.overlay_mode else '关'}", self.toggle_overlay)
+        self.overlay_btn.pack(side="left", padx=2)
         self._mk_button(btns, "⚙", self.open_settings).pack(side="left", padx=2)
         self._mk_button(btns, "—", self.minimize).pack(side="left", padx=2)
         self._mk_button(btns, "×", self._on_close).pack(side="left", padx=2)
@@ -159,7 +169,7 @@ class FloatTranslate:
     def _on_move(self, e):
         self.root.geometry(
             f"+{self._ox + (e.x_root - self._mx)}+{self._oy + (e.y_root - self._my)}")
-        self._sync_veil()
+        self._sync_overlays()
 
     def _start_resize(self, e):
         self._mx, self._my = e.x_root, e.y_root
@@ -169,15 +179,17 @@ class FloatTranslate:
         w = max(280, self._ow + (e.x_root - self._mx))
         h = max(220, self._oh + (e.y_root - self._my))
         self.root.geometry(f"{w}x{h}")
-        self._sync_veil()
+        self._sync_overlays()
 
     def _on_capture_configure(self, _e=None):
-        self._sync_veil()
+        self._sync_overlays()
 
-    # ------------------------------------------------------------- veil ------
-    def _create_veil(self):
-        """A separate translucent, click-through window that tints the capture
-        region a solid gray (real alpha, not a dithered pattern)."""
+    # --------------------------------------------------------- overlays ------
+    def _create_overlays(self):
+        """Create the two click-through child windows that sit over the capture
+        region: a solid gray veil (normal mode) and the white-box translation
+        overlay (overlay mode). Only one is shown at a time."""
+        # Gray tint veil.
         veil = self._veil_win = tk.Toplevel(self.root)
         veil.overrideredirect(True)
         veil.attributes("-topmost", True)
@@ -185,7 +197,24 @@ class FloatTranslate:
         veil.attributes("-alpha", VEIL_ALPHA)
         veil.update_idletasks()
         self._make_click_through(veil)
-        self._sync_veil()
+
+        # Translation overlay: transparent body, opaque white boxes + text.
+        win = self._overlay_win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.configure(bg=TRANSPARENT)
+        win.attributes("-transparentcolor", TRANSPARENT)
+        cv = self._overlay_canvas = tk.Canvas(
+            win, bg=TRANSPARENT, highlightthickness=0, bd=0)
+        cv.pack(fill="both", expand=True)
+        win.update_idletasks()
+        self._make_click_through(win)
+        win.withdraw()  # shown only when it has content
+
+        # In overlay mode the veil should not show.
+        if self.cfg.overlay_mode:
+            veil.withdraw()
+        self._sync_overlays()
 
     def _make_click_through(self, win: tk.Toplevel):
         """Add WS_EX_TRANSPARENT so mouse events pass through the overlay."""
@@ -199,16 +228,25 @@ class FloatTranslate:
         except Exception:
             pass
 
-    def _sync_veil(self):
-        """Keep the veil window exactly over the capture region's interior."""
-        if self._veil_win is None or self._minimized:
-            return
+    def _capture_screen_rect(self) -> tuple[int, int, int, int]:
+        """Screen rect (x, y, w, h) of the capture region's interior."""
         self.root.update_idletasks()
         x = self.capture.winfo_rootx() + 2
         y = self.capture.winfo_rooty() + 2
         w = max(1, self.capture.winfo_width() - 4)
         h = max(1, self.capture.winfo_height() - 4)
-        self._veil_win.geometry(f"{w}x{h}+{x}+{y}")
+        return x, y, w, h
+
+    def _sync_overlays(self):
+        """Keep the veil and translation overlay aligned with the capture region."""
+        if self._minimized:
+            return
+        x, y, w, h = self._capture_screen_rect()
+        geo = f"{w}x{h}+{x}+{y}"
+        if self._veil_win is not None:
+            self._veil_win.geometry(geo)
+        if self._overlay_win is not None:
+            self._overlay_win.geometry(geo)
 
     # ------------------------------------------------------------ status ----
     def _set_status(self, text, color="#9aa0a6"):
@@ -273,12 +311,16 @@ class FloatTranslate:
         bbox = self._capture_bbox()
         if bbox is None:
             return None
-        # Flash the overlay invisible so the screenshot sees only the content
-        # behind the window, then restore it.
+        # Flash both overlays invisible so the screenshot sees only the content
+        # behind the window, then restore them.
         veil = self._veil_win
+        ov = self._overlay_win
+        ov_visible = ov is not None and bool(ov.winfo_viewable())
         if veil is not None:
             veil.attributes("-alpha", 0)
-            veil.update_idletasks()
+        if ov_visible:
+            ov.withdraw()
+        self.root.update_idletasks()
         try:
             with mss.MSS() as sct:
                 shot = sct.grab(bbox)
@@ -286,6 +328,8 @@ class FloatTranslate:
         finally:
             if veil is not None:
                 veil.attributes("-alpha", VEIL_ALPHA)
+            if ov_visible:
+                ov.deiconify()
 
     def _worker(self, translator: Translator, img: Image.Image, force: bool):
         try:
@@ -295,21 +339,50 @@ class FloatTranslate:
                 return
             self._last_image_hash = img_hash
 
-            text = ocr.recognize(img, self.cfg.ocr_language or None).strip()
-            if not text:
-                self.root.after(0, lambda: self._finish("（未识别到文字）", None))
-                return
-            if not force and text == self._last_text:
-                self.root.after(0, lambda: self._finish(None, None))
-                return
-            self._last_text = text
-
-            self.root.after(0, lambda: self._set_status("翻译中…", "#fdd663"))
-            translated = translator.translate(text)
-            self.root.after(0, lambda: self._finish(translated, None))
+            if self.cfg.overlay_mode:
+                self._run_overlay(translator, img, force)
+            else:
+                self._run_panel(translator, img, force)
         except Exception as exc:  # surface any failure in the status line
             msg = str(exc)
             self.root.after(0, lambda: self._finish(None, msg))
+
+    def _run_panel(self, translator: Translator, img: Image.Image, force: bool):
+        """Normal mode: translate the whole region, show it in the bottom panel."""
+        text = ocr.recognize(img, self.cfg.ocr_language or None).strip()
+        if not text:
+            self.root.after(0, lambda: self._finish("（未识别到文字）", None))
+            return
+        if not force and text == self._last_text:
+            self.root.after(0, lambda: self._finish(None, None))
+            return
+        self._last_text = text
+        self.root.after(0, lambda: self._set_status("翻译中…", "#fdd663"))
+        translated = translator.translate(text)
+        self.root.after(0, lambda: self._finish(translated, None))
+
+    def _run_overlay(self, translator: Translator, img: Image.Image, force: bool):
+        """Overlay mode: translate each detected line and draw white boxes with
+        the translation in place over the original text."""
+        lines = [ln for ln in ocr.recognize_lines(img, self.cfg.ocr_language or None)
+                 if ln["text"].strip()]
+        if not lines:
+            self.root.after(0, lambda: self._finish_overlay([], "（未识别到文字）"))
+            return
+        combined = "\n".join(ln["text"] for ln in lines)
+        if not force and combined == self._last_text:
+            self.root.after(0, lambda: self._finish(None, None))
+            return
+        self._last_text = combined
+
+        self.root.after(0, lambda: self._set_status("翻译中…", "#fdd663"))
+        items = []
+        for ln in lines:
+            ln = dict(ln)
+            ln["translation"] = translator.translate(ln["text"])
+            items.append(ln)
+        full = "\n".join(it["translation"] for it in items)
+        self.root.after(0, lambda: self._finish_overlay(items, None, full))
 
     def _finish(self, result: str | None, error: str | None):
         self._busy = False
@@ -321,6 +394,51 @@ class FloatTranslate:
             self._show_result(result)
         else:
             self._set_status("无变化", "#9aa0a6")
+
+    def _finish_overlay(self, items: list, message: str | None, full: str | None = None):
+        self._busy = False
+        if not items:
+            self._clear_overlay()
+            self._set_status(message or "无变化", "#9aa0a6")
+            if message:
+                self._show_result(message)
+            return
+        self._draw_overlay(items)
+        self._set_status("完成", "#81c995")
+        if full is not None:
+            self._show_result(full)
+
+    # ----------------------------------------------------- overlay drawing ----
+    def _draw_overlay(self, items: list):
+        win, cv = self._overlay_win, self._overlay_canvas
+        if win is None or cv is None:
+            return
+        self._sync_overlays()
+        cv.delete("all")
+        for it in items:
+            x, y, w, h = it["x"], it["y"], it["w"], it["h"]
+            # White box covering the original text (slightly padded).
+            cv.create_rectangle(x - 2, y - 2, x + w + 2, y + h + 2,
+                                fill="#ffffff", outline="#ffffff")
+            font = self._fit_font(it["translation"], w, h)
+            cv.create_text(x, y + h / 2, text=it["translation"], anchor="w",
+                           fill="#000000", font=font)
+        if not win.winfo_viewable():
+            win.deiconify()
+
+    def _fit_font(self, text: str, max_w: int, max_h: int) -> tkfont.Font:
+        size = max(8, int(max_h * 0.78))
+        font = tkfont.Font(family="Microsoft YaHei UI", size=size)
+        while size > 7 and font.measure(text) > max(1, max_w):
+            size -= 1
+            font.configure(size=size)
+        return font
+
+    def _clear_overlay(self):
+        if self._overlay_canvas is not None:
+            self._overlay_canvas.delete("all")
+        if self._overlay_win is not None and self._overlay_win.winfo_viewable():
+            self._overlay_win.withdraw()
 
     # --------------------------------------------------------------- auto ----
     def toggle_auto(self):
@@ -337,6 +455,22 @@ class FloatTranslate:
             return
         self._scan(force=False)
         self._auto_job = self.root.after(self.cfg.auto_interval_ms, self._auto_tick)
+
+    # -------------------------------------------------------- overlay mode ----
+    def toggle_overlay(self):
+        on = not self.cfg.overlay_mode
+        self.cfg.overlay_mode = on
+        self.overlay_btn.configure(text=f"覆盖:{'开' if on else '关'}")
+        if self._veil_win is not None:
+            (self._veil_win.withdraw if on else self._veil_win.deiconify)()
+        if not on:
+            self._clear_overlay()
+        # Force a fresh render on the next scan.
+        self._last_image_hash = None
+        self._last_text = ""
+        self._sync_overlays()
+        if on and not self._minimized:
+            self.translate_once()
 
     # ----------------------------------------------------------- settings ----
     def open_settings(self):
@@ -357,6 +491,8 @@ class FloatTranslate:
         self.root.withdraw()
         if self._veil_win is not None:
             self._veil_win.withdraw()
+        if self._overlay_win is not None:
+            self._overlay_win.withdraw()
 
         size, margin_x, margin_y = 60, 40, 80  # bottom margin clears the taskbar
         sw = self.root.winfo_screenwidth()
@@ -405,9 +541,11 @@ class FloatTranslate:
         self.root.deiconify()
         self.root.lift()
         self.root.attributes("-topmost", True)
-        if self._veil_win is not None:
+        if self._veil_win is not None and not self.cfg.overlay_mode:
             self._veil_win.deiconify()
-            self._sync_veil()
+        self._sync_overlays()
+        if self.cfg.overlay_mode:
+            self.root.after(150, self.translate_once)
 
     # -------------------------------------------------------------- close ----
     def _on_close(self):
@@ -417,6 +555,9 @@ class FloatTranslate:
         if self._veil_win is not None:
             self._veil_win.destroy()
             self._veil_win = None
+        if self._overlay_win is not None:
+            self._overlay_win.destroy()
+            self._overlay_win = None
         try:
             self.cfg.geometry = (
                 f"{self.root.winfo_width()}x{self.root.winfo_height()}"

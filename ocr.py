@@ -66,5 +66,54 @@ def recognize(img: Image.Image, lang_tag: str | None = None) -> str:
     return asyncio.run(_recognize(img, lang_tag))
 
 
+async def _recognize_lines(img: Image.Image, lang_tag: str | None) -> list[dict]:
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PNG")
+
+    stream = InMemoryRandomAccessStream()
+    writer = DataWriter(stream.get_output_stream_at(0))
+    writer.write_bytes(buf.getvalue())
+    await writer.store_async()
+    await writer.flush_async()
+    stream.seek(0)
+
+    decoder = await BitmapDecoder.create_async(stream)
+    bitmap: SoftwareBitmap = await decoder.get_software_bitmap_async()
+
+    engine = _make_engine(lang_tag)
+    if engine is None:
+        raise RuntimeError(
+            "No OCR engine available. Install a language pack in "
+            "Windows Settings > Time & Language > Language."
+        )
+
+    result = await engine.recognize_async(bitmap)
+    lines: list[dict] = []
+    for line in result.lines:
+        # A line has no bounding box of its own; union its words' rects.
+        x0 = y0 = float("inf")
+        x1 = y1 = float("-inf")
+        for word in line.words:
+            r = word.bounding_rect
+            x0, y0 = min(x0, r.x), min(y0, r.y)
+            x1, y1 = max(x1, r.x + r.width), max(y1, r.y + r.height)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        lines.append({
+            "text": line.text,
+            "x": int(x0), "y": int(y0),
+            "w": int(x1 - x0), "h": int(y1 - y0),
+        })
+    return lines
+
+
+def recognize_lines(img: Image.Image, lang_tag: str | None = None) -> list[dict]:
+    """OCR a PIL image and return per-line boxes in image-pixel coordinates.
+
+    Each item: {"text", "x", "y", "w", "h"}. Safe to call from a worker thread.
+    """
+    return asyncio.run(_recognize_lines(img, lang_tag))
+
+
 if __name__ == "__main__":
     print("Available OCR languages:", available_languages())
