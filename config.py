@@ -31,9 +31,6 @@ class Config:
     ocr_language: str = ""
     # Auto mode: re-scan the capture region every N milliseconds.
     auto_interval_ms: int = 1500
-    # Overlay mode: cover the original text with white boxes and draw the
-    # translation in place, instead of showing it in the bottom panel.
-    overlay_mode: bool = False
     # Window geometry "WxH+X+Y" remembered between runs.
     geometry: str = "520x420+200+200"
     # Legacy single Anthropic key (pre-multi-provider); migrated into api_keys.
