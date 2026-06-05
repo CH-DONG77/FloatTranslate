@@ -9,6 +9,33 @@
   OpenAI、DeepSeek、Google (Gemini)**，在设置里切换。
 - **方向**：任意语言 → 简体中文（可在设置里改目标语言）。
 
+## 两种翻译方式（按分支选择）
+
+本项目提供两种译文显示方式，分别维护在两个分支上，用带前缀的标签管理各自的版本：
+
+| 分支 | 翻译方式 | 说明 | 版本标签 |
+|------|----------|------|----------|
+| [`panel`](../../tree/panel) | **面板模式** | 译文显示在悬浮窗底部的文本面板里 | `panel-v1.0.x` |
+| [`overlay`](../../tree/overlay) | **覆盖模式** | 用白块盖住原文、把译文就地画在原文位置上 | `overlay-v2.0.x` |
+
+获取某种方式的最新代码：
+
+```bash
+git clone https://github.com/CH-DONG77/FloatTranslate.git
+cd FloatTranslate
+git checkout panel       # 面板模式
+# 或
+git checkout overlay     # 覆盖模式
+
+# 也可以直接检出某个具体版本：
+git checkout panel-v1.0.3
+git checkout overlay-v2.0.1
+```
+
+> `main` 分支仅作项目说明入口；实际功能代码在 `panel` 与 `overlay` 两个分支上。
+
+下面的说明以**面板模式**为例，两种方式的安装与配置完全相同。
+
 ## 工作原理
 
 ```
