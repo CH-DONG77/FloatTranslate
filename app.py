@@ -71,6 +71,9 @@ class FloatTranslate:
         self._overlay_canvas: tk.Canvas | None = None
         self._overlay_items: list = []   # last drawn lines (boxes + translation)
         self._show_original = False      # peek mode: hide boxes, show original
+        # Cached (dx, dy, mw, mh) so overlay geometry during a drag/resize can be
+        # computed by arithmetic instead of winfo + update_idletasks (smooth UI).
+        self._cap_off: tuple | None = None
 
         self.root = tk.Tk()
         self.root.title("FloatTranslate")
@@ -120,6 +123,7 @@ class FloatTranslate:
         for w in (bar, grip, self.status):
             w.bind("<Button-1>", self._start_move)
             w.bind("<B1-Motion>", self._on_move)
+            w.bind("<ButtonRelease-1>", self._on_drag_end)
 
         # --- transparent capture band ---
         # The canvas body is the sentinel colour = a real see-through hole, so
@@ -141,6 +145,7 @@ class FloatTranslate:
         sizer.grid(row=0, column=0, sticky="e", padx=3)
         sizer.bind("<Button-1>", self._start_resize)
         sizer.bind("<B1-Motion>", self._on_resize)
+        sizer.bind("<ButtonRelease-1>", self._on_drag_end)
 
     def _mk_button(self, parent, text, cmd, accent=False) -> tk.Button:
         return tk.Button(
@@ -155,25 +160,35 @@ class FloatTranslate:
     def _start_move(self, e):
         self._mx, self._my = e.x_root, e.y_root
         self._ox, self._oy = self.root.winfo_x(), self.root.winfo_y()
+        self._ow, self._oh = self.root.winfo_width(), self.root.winfo_height()
 
     def _on_move(self, e):
-        self.root.geometry(
-            f"+{self._ox + (e.x_root - self._mx)}+{self._oy + (e.y_root - self._my)}")
+        x = self._ox + (e.x_root - self._mx)
+        y = self._oy + (e.y_root - self._my)
+        self.root.geometry(f"+{x}+{y}")
         # Moving the window invalidates the overlay alignment: drop the boxes.
         self._clear_overlay()
-        self._sync_overlays()
+        self._sync_overlays(self._overlays_geometry(x, y, self._ow, self._oh))
 
     def _start_resize(self, e):
         self._mx, self._my = e.x_root, e.y_root
+        self._ox, self._oy = self.root.winfo_x(), self.root.winfo_y()
         self._ow, self._oh = self.root.winfo_width(), self.root.winfo_height()
 
     def _on_resize(self, e):
         w = max(280, self._ow + (e.x_root - self._mx))
         h = max(220, self._oh + (e.y_root - self._my))
         self.root.geometry(f"{w}x{h}")
+        self._sync_overlays(self._overlays_geometry(self._ox, self._oy, w, h))
+
+    def _on_drag_end(self, _e=None):
+        """After a drag/resize settles, do one accurate winfo-based sync."""
+        self.root.update_idletasks()
         self._sync_overlays()
 
     def _on_capture_configure(self, _e=None):
+        # Configure fires after layout is current, so winfo is already fresh —
+        # no update_idletasks needed here (keeps resize smooth).
         self._sync_overlays()
 
     # --------------------------------------------------------- overlays ------
@@ -203,6 +218,7 @@ class FloatTranslate:
         self._make_click_through(win)
         win.withdraw()  # shown only when it has content
 
+        self._cache_layout_offsets()
         self._sync_overlays()
 
     def _make_click_through(self, win: tk.Toplevel):
@@ -217,21 +233,34 @@ class FloatTranslate:
         except Exception:
             pass
 
-    def _capture_screen_rect(self) -> tuple[int, int, int, int]:
-        """Screen rect (x, y, w, h) of the capture region's interior."""
+    def _cache_layout_offsets(self):
+        """Measure (once) how the capture interior sits inside the root window,
+        so drags can position the overlays without querying the layout."""
         self.root.update_idletasks()
-        x = self.capture.winfo_rootx() + 2
-        y = self.capture.winfo_rooty() + 2
-        w = max(1, self.capture.winfo_width() - 4)
-        h = max(1, self.capture.winfo_height() - 4)
-        return x, y, w, h
+        dx = self.capture.winfo_rootx() + 2 - self.root.winfo_rootx()
+        dy = self.capture.winfo_rooty() + 2 - self.root.winfo_rooty()
+        mw = self.root.winfo_width() - max(1, self.capture.winfo_width() - 4)
+        mh = self.root.winfo_height() - max(1, self.capture.winfo_height() - 4)
+        self._cap_off = (dx, dy, mw, mh)
 
-    def _sync_overlays(self):
-        """Keep the veil and translation overlay aligned with the capture region."""
+    def _overlays_geometry(self, x: int, y: int, w: int, h: int) -> str | None:
+        """Overlay geometry for a target root rect, via cached offsets (cheap)."""
+        if self._cap_off is None:
+            return None
+        dx, dy, mw, mh = self._cap_off
+        return f"{max(1, w - mw)}x{max(1, h - mh)}+{x + dx}+{y + dy}"
+
+    def _sync_overlays(self, geo: str | None = None):
+        """Align veil + overlay with the capture region. Pass `geo` to skip the
+        winfo lookup (used on the drag hot path); omit it for an exact sync."""
         if self._minimized:
             return
-        x, y, w, h = self._capture_screen_rect()
-        geo = f"{w}x{h}+{x}+{y}"
+        if geo is None:
+            x = self.capture.winfo_rootx() + 2
+            y = self.capture.winfo_rooty() + 2
+            w = max(1, self.capture.winfo_width() - 4)
+            h = max(1, self.capture.winfo_height() - 4)
+            geo = f"{w}x{h}+{x}+{y}"
         if self._veil_win is not None:
             self._veil_win.geometry(geo)
         if self._overlay_win is not None:
