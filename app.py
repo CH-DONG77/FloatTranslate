@@ -628,7 +628,9 @@ class SettingsDialog:
 
         # --- target language ---
         self._label(top, "目标语言", r)
-        tk.Entry(top, textvariable=self.var_target, width=33).grid(
+        # Editable combobox: pick a common target or type any language name.
+        ttk.Combobox(top, textvariable=self.var_target, width=30,
+                     values=["简体中文", "English", "繁體中文", "日本語", "한국어"]).grid(
             row=r, column=1, sticky="ew", padx=(10, 0), pady=4)
         r += 1
 
