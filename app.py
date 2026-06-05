@@ -25,14 +25,15 @@ from translator import Translator
 # see and screenshot whatever lies behind it.
 TRANSPARENT = "#FF00FE"
 
-BAR_BG = "#202124"
+BAR_BG = "#000000"
 BAR_FG = "#e8eaed"
-RESULT_BG = "#2b2c2f"
+RESULT_BG = "#000000"
 RESULT_FG = "#f1f3f4"
 ACCENT = "#3b6ef5"
-# Light-gray veil drawn over the capture region (dithered so it reads as
-# semi-transparent and you can still see the text underneath).
-VEIL = "#d9d9d9"
+# Gray veil drawn over the capture region (dithered so it reads as
+# semi-transparent while you can still see the text underneath).
+VEIL = "#9e9e9e"
+VEIL_STIPPLE = "gray50"
 
 
 def _enable_dpi_awareness() -> None:
@@ -114,7 +115,7 @@ class FloatTranslate:
                                  highlightthickness=2, highlightbackground=ACCENT)
         self.capture.grid(row=1, column=0, sticky="nsew")
         self._veil = self.capture.create_rectangle(
-            0, 0, 1, 1, fill=VEIL, stipple="gray25", outline="")
+            0, 0, 1, 1, fill=VEIL, stipple=VEIL_STIPPLE, outline="")
         self.capture.bind("<Configure>", self._on_capture_configure)
 
         # --- result panel ---
@@ -300,13 +301,22 @@ class FloatTranslate:
 
     # ----------------------------------------------------- minimize / ball ----
     def minimize(self):
-        """Hide the main window and show a draggable floating ball instead."""
+        """Hide the main window and show a draggable floating ball instead.
+
+        The ball parks at the bottom-right of the desktop; restoring brings the
+        window back to wherever it was when minimized.
+        """
         if self._minimized:
             return
         self._minimized = True
-        x, y = self.root.winfo_x(), self.root.winfo_y()
+        # Remember where to bring the window back to.
+        self._restore_pos = (self.root.winfo_x(), self.root.winfo_y())
         self.root.withdraw()
-        self._show_ball(x, y)
+
+        size, margin_x, margin_y = 60, 40, 80  # bottom margin clears the taskbar
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        self._show_ball(sw - size - margin_x, sh - size - margin_y)
 
     def _show_ball(self, x: int, y: int):
         size = 60
@@ -339,13 +349,13 @@ class FloatTranslate:
             f"+{self._box + (e.x_root - self._bx)}+{self._boy + (e.y_root - self._by)}")
 
     def _restore(self, _e=None):
-        """Double-click the ball: destroy it and bring the window back where
-        the ball now sits."""
+        """Double-click the ball: destroy it and bring the window back to the
+        position it had when it was minimized."""
         if self._ball is not None:
-            bx, by = self._ball.winfo_x(), self._ball.winfo_y()
             self._ball.destroy()
             self._ball = None
-            self.root.geometry(f"+{max(0, bx)}+{max(0, by)}")
+        x, y = getattr(self, "_restore_pos", (self.root.winfo_x(), self.root.winfo_y()))
+        self.root.geometry(f"+{max(0, x)}+{max(0, y)}")
         self._minimized = False
         self.root.deiconify()
         self.root.lift()
