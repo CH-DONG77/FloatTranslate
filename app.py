@@ -407,21 +407,28 @@ class FloatTranslate:
                 win.withdraw()
             return
         self._sync_overlays()
+        # One uniform font for every line so the text doesn't jump in size.
+        font = self._uniform_font(self._overlay_items)
         for it in self._overlay_items:
             x, y, w, h = it["x"], it["y"], it["w"], it["h"]
             # White box covering the original text (slightly padded).
             cv.create_rectangle(x - 2, y - 2, x + w + 2, y + h + 2,
                                 fill="#ffffff", outline="#ffffff")
-            font = self._fit_font(it["translation"], w, h)
             cv.create_text(x, y + h / 2, text=it["translation"], anchor="w",
                            fill="#000000", font=font)
         if not win.winfo_viewable():
             win.deiconify()
 
-    def _fit_font(self, text: str, max_w: int, max_h: int) -> tkfont.Font:
-        size = max(8, int(max_h * 0.78))
+    def _uniform_font(self, items: list) -> tkfont.Font:
+        """A single font size for the whole overlay: based on the median line
+        height, shrunk only if some translation clearly overflows its box."""
+        heights = sorted(it["h"] for it in items)
+        median_h = heights[len(heights) // 2]
+        size = max(9, min(28, int(median_h * 0.72)))
         font = tkfont.Font(family="Microsoft YaHei UI", size=size)
-        while size > 7 and font.measure(text) > max(1, max_w):
+        while size > 9 and any(
+            font.measure(it["translation"]) > it["w"] * 1.1 for it in items
+        ):
             size -= 1
             font.configure(size=size)
         return font
