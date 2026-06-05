@@ -1,5 +1,10 @@
 # FloatTranslate · 悬浮窗屏幕翻译
 
+![License](https://img.shields.io/badge/license-MIT-blue)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6)
+![Python](https://img.shields.io/badge/python-3.x-3776AB)
+![OCR](https://img.shields.io/badge/OCR-Windows%20built--in-success)
+
 一个 Windows 桌面悬浮翻译工具。把半透明的捕获窗口对准屏幕上**任何**文字
 （游戏、图片、PDF、外文软件界面），即可识别并翻译成中文 —— 哪怕这些文字
 本身无法复制。
