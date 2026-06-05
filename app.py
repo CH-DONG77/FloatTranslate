@@ -356,8 +356,8 @@ class FloatTranslate:
             self.root.after(0, lambda: self._finish_error(msg))
 
     def _run_overlay(self, translator: Translator, img: Image.Image, force: bool):
-        """Translate each detected line and draw a white box with the
-        translation in place over the original text."""
+        """Group lines into paragraphs, translate each paragraph as a whole (so
+        cross-line context is kept), and store paragraphs for in-place flow."""
         lines = [ln for ln in ocr.recognize_lines(img, self.cfg.ocr_language or None)
                  if ln["text"].strip()]
         if not lines:
@@ -370,12 +370,32 @@ class FloatTranslate:
         self._last_text = combined
 
         self.root.after(0, lambda: self._set_status("翻译中…", "#fdd663"))
-        items = []
+        paragraphs = []
+        for group in self._group_paragraphs(lines):
+            # Join wrapped OCR lines back into one flowing sentence for context.
+            source = " ".join(ln["text"] for ln in group)
+            translation = translator.translate(source)
+            boxes = [{"x": ln["x"], "y": ln["y"], "w": ln["w"], "h": ln["h"]}
+                     for ln in group]
+            paragraphs.append({"boxes": boxes, "text": translation})
+        self.root.after(0, lambda: self._finish_overlay(paragraphs, None))
+
+    @staticmethod
+    def _group_paragraphs(lines: list) -> list:
+        """Split lines into paragraphs wherever there is a vertical gap larger
+        than ~0.8 of a line height (i.e. a blank-ish line between blocks)."""
+        paras, cur = [], []
         for ln in lines:
-            ln = dict(ln)
-            ln["translation"] = translator.translate(ln["text"])
-            items.append(ln)
-        self.root.after(0, lambda: self._finish_overlay(items, None))
+            if cur:
+                prev = cur[-1]
+                gap = ln["y"] - (prev["y"] + prev["h"])
+                if gap > prev["h"] * 0.8:
+                    paras.append(cur)
+                    cur = []
+            cur.append(ln)
+        if cur:
+            paras.append(cur)
+        return paras
 
     def _finish_idle(self):
         self._busy = False
@@ -397,7 +417,8 @@ class FloatTranslate:
 
     # ----------------------------------------------------- overlay drawing ----
     def _render_overlay(self):
-        """Draw the stored translation boxes — unless peeking at the original."""
+        """Draw the stored paragraphs — white boxes over the original text with
+        each paragraph's translation flowed across its line boxes."""
         win, cv = self._overlay_win, self._overlay_canvas
         if win is None or cv is None:
             return
@@ -407,28 +428,62 @@ class FloatTranslate:
                 win.withdraw()
             return
         self._sync_overlays()
-        # One uniform font for every line so the text doesn't jump in size.
         font = self._uniform_font(self._overlay_items)
-        for it in self._overlay_items:
-            x, y, w, h = it["x"], it["y"], it["w"], it["h"]
-            # White box covering the original text (slightly padded).
-            cv.create_rectangle(x - 2, y - 2, x + w + 2, y + h + 2,
-                                fill="#ffffff", outline="#ffffff")
-            cv.create_text(x, y + h / 2, text=it["translation"], anchor="w",
-                           fill="#000000", font=font)
+        for para in self._overlay_items:
+            for box, chunk in self._flow_text(para["text"], para["boxes"], font):
+                x, y, w, h = box["x"], box["y"], box["w"], box["h"]
+                # White box covering the original text (slightly padded).
+                cv.create_rectangle(x - 2, y - 2, x + w + 2, y + h + 2,
+                                    fill="#ffffff", outline="#ffffff")
+                if chunk:
+                    cv.create_text(x, y + h / 2, text=chunk, anchor="w",
+                                   fill="#000000", font=font)
         if not win.winfo_viewable():
             win.deiconify()
 
-    def _uniform_font(self, items: list) -> tkfont.Font:
-        """A single font size for the whole overlay: based on the median line
-        height, shrunk only if some translation clearly overflows its box."""
-        heights = sorted(it["h"] for it in items)
+    def _flow_text(self, text: str, boxes: list, font: tkfont.Font) -> list:
+        """Distribute `text` across `boxes` left-to-right/top-to-bottom, packing
+        as much as fits each box's width; the last box takes the remainder."""
+        out, idx, n = [], 0, len(text)
+        last = len(boxes) - 1
+        for k, b in enumerate(boxes):
+            if idx >= n:
+                out.append((b, ""))
+                continue
+            if k == last:
+                out.append((b, text[idx:].strip()))
+                idx = n
+                continue
+            j = idx
+            while j < n and font.measure(text[idx:j + 1].strip()) <= b["w"]:
+                j += 1
+            if j <= idx:
+                j = idx + 1
+            # Avoid splitting a Latin word mid-way.
+            if j < n and not text[j].isspace() and not text[j - 1].isspace():
+                sp = text.rfind(" ", idx, j)
+                if sp > idx:
+                    j = sp + 1
+            out.append((b, text[idx:j].strip()))
+            idx = j
+        return out
+
+    def _uniform_font(self, paras: list) -> tkfont.Font:
+        """One font size for the whole overlay: from the median line height,
+        shrunk only if a paragraph can't fit across its boxes' total width."""
+        heights = sorted(b["h"] for p in paras for b in p["boxes"])
         median_h = heights[len(heights) // 2]
         size = max(9, min(28, int(median_h * 0.72)))
         font = tkfont.Font(family="Microsoft YaHei UI", size=size)
-        while size > 9 and any(
-            font.measure(it["translation"]) > it["w"] * 1.1 for it in items
-        ):
+
+        def fits() -> bool:
+            for p in paras:
+                cap = sum(b["w"] for b in p["boxes"]) * 1.05
+                if font.measure(p["text"]) > cap:
+                    return False
+            return True
+
+        while size > 9 and not fits():
             size -= 1
             font.configure(size=size)
         return font
